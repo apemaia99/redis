@@ -10,8 +10,8 @@ class RedisTopologyDiscover {
         self.sentinel = sentinel
     }
 
-    func discovery(for id: RedisID) -> EventLoopFuture<[(role: RedisRole, node: RedisNode)]> {
-        let promise = sentinel.eventLoop.makePromise(of: [(role: RedisRole, node: RedisNode)].self)
+    func discovery(for id: RedisID) -> EventLoopFuture<[RedisNode]> {
+        let promise = sentinel.eventLoop.makePromise(of: [RedisNode].self)
         let master = sentinel.send(
             command: "SENTINEL",
             with: [
@@ -48,9 +48,7 @@ class RedisTopologyDiscover {
         master.and(replicas).whenComplete { result in
             switch result {
             case let .success((newMaster, replicas)):
-                promise.succeed(
-                    [(.master, newMaster)] + replicas.map({ (.slave, $0) })
-                )
+                promise.succeed([newMaster] + replicas)
             case let .failure(error):
                 promise.fail(error)
             }
@@ -75,7 +73,7 @@ extension Application.Redis {
                     
                     let newConfigurations = try nodes.map({
                         return try RedisConfiguration.Configuration(
-                            serverAddresses: [$0.node.socketAddress],
+                            serverAddresses: [$0.socketAddress],
                             password: master.password,
                             tlsConfiguration: master.tlsConfiguration,
                             tlsHostname: master.tlsHostname,
