@@ -16,8 +16,8 @@ extension Application {
         }
 
         @usableFromInline
-        internal func pool(for eventLoop: EventLoop) -> RedisConnectionPool {
-            self.application.redisStorage.pool(for: eventLoop, id: self.id)
+        func pool(for eventLoop: EventLoop, role: RedisRole = .master) -> RedisConnectionPool {
+            self.application.redisStorage.pool(for: eventLoop, id: self.id, role: role)
         }
     }
 }
