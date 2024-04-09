@@ -1,21 +1,43 @@
 import Foundation
-import NIOSSL
-import NIOPosix
 import Logging
 import NIOCore
+import NIOPosix
+import NIOSSL
 import RediStack
 
-/// Configuration for connecting to a Redis instance
-public struct RedisConfiguration {
-    public typealias ValidationError = RedisConnection.Configuration.ValidationError
+/// Configuration mode for connecting to a Redis instance
+public enum RedisConfiguration {
+    case standalone(Configuration)
+    case highAvailability(sentinel: Configuration, redis: [Configuration])
+}
 
-    public var serverAddresses: [SocketAddress]
-    public var password: String?
-    public var database: Int?
-    public var pool: PoolOptions
-    public var tlsConfiguration: TLSConfiguration?
-    public var tlsHostname: String?
+extension RedisConfiguration {
+    /// Configuration for connecting to a Redis instance
+    public struct Configuration {
+        public typealias ValidationError = RedisConnection.Configuration.ValidationError
 
+        public let role: RedisRole
+        public var serverAddresses: [SocketAddress]
+        public var password: String?
+        public var database: Int?
+        public var pool: PoolOptions
+        public var tlsConfiguration: TLSConfiguration?
+        public var tlsHostname: String?
+
+        fileprivate init(role: RedisRole, serverAddresses: [SocketAddress], password: String? = nil, database: Int? = nil, pool: PoolOptions, tlsConfiguration: TLSConfiguration? = nil, tlsHostname: String? = nil) {
+            self.role = role
+            self.serverAddresses = serverAddresses
+            self.password = password
+            self.database = database
+            self.pool = pool
+            self.tlsConfiguration = tlsConfiguration
+            self.tlsHostname = tlsHostname
+        }
+    }
+}
+
+extension RedisConfiguration.Configuration {
+    /// Configuration pool options
     public struct PoolOptions {
         public var maximumConnectionCount: RedisConnectionPoolSize
         public var minimumConnectionCount: Int
@@ -40,7 +62,9 @@ public struct RedisConfiguration {
             self.onUnexpectedConnectionClose = onUnexpectedConnectionClose
         }
     }
+}
 
+extension RedisConfiguration.Configuration {
     public init(url string: String, tlsConfiguration: TLSConfiguration? = nil, pool: PoolOptions = .init()) throws {
         guard let url = URL(string: string) else { throw ValidationError.invalidURLString }
         try self.init(url: url, tlsConfiguration: tlsConfiguration, pool: pool)
@@ -98,19 +122,51 @@ public struct RedisConfiguration {
         tlsConfiguration: TLSConfiguration? = nil,
         tlsHostname: String? = nil,
         database: Int? = nil,
+        role: RedisRole = .master,
         pool: PoolOptions = .init()
     ) throws {
+        self.role = role
         self.serverAddresses = serverAddresses
         self.password = password
-        self.tlsConfiguration = tlsConfiguration
-        self.tlsHostname = tlsHostname
         self.database = database
         self.pool = pool
+        self.tlsConfiguration = tlsConfiguration
+        self.tlsHostname = tlsHostname
+    }
+}
+
+extension RedisConfiguration {
+    public static func standalone(configuration: Self.Configuration) throws -> RedisConfiguration {
+        return .standalone(configuration)
+    }
+
+    public static func cluster(sentinelConfiguration: Self.Configuration, redisConfiguration: Self.Configuration) throws -> RedisConfiguration {
+        let sentinel = try RedisConfiguration.Configuration(
+            role: .sentinel,
+            serverAddresses: sentinelConfiguration.serverAddresses,
+            password: sentinelConfiguration.password,
+            database: nil,
+            pool: sentinelConfiguration.pool,
+            tlsConfiguration: sentinelConfiguration.tlsConfiguration,
+            tlsHostname: sentinelConfiguration.tlsHostname
+        )
+
+        let redis = try RedisConfiguration.Configuration(
+            role: .master,
+            serverAddresses: redisConfiguration.serverAddresses,
+            password: redisConfiguration.password,
+            database: redisConfiguration.database,
+            pool: redisConfiguration.pool,
+            tlsConfiguration: redisConfiguration.tlsConfiguration,
+            tlsHostname: redisConfiguration.tlsHostname
+        )
+
+        return .highAvailability(sentinel: sentinel, redis: [redis])
     }
 }
 
 extension RedisConnectionPool.Configuration {
-    internal init(_ config: RedisConfiguration, defaultLogger: Logger, customClient: ClientBootstrap?) {
+    internal init(_ config: RedisConfiguration.Configuration, defaultLogger: Logger, customClient: ClientBootstrap?) {
         self.init(
             initialServerConnectionAddresses: config.serverAddresses,
             maximumConnectionCount: config.pool.maximumConnectionCount,
