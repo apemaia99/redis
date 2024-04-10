@@ -173,6 +173,8 @@ extension RedisStorage {
                     }
                 }
         }()
+        
+        logger.notice("CREATION OF POOL CONF IP:\(configuration.serverAddresses)")
 
         let newPool = RedisConnectionPool(
             configuration: .init(configuration, defaultLogger: logger, customClient: redisTLSClient),
