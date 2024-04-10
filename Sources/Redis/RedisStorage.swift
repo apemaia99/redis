@@ -90,7 +90,8 @@ final class RedisStorage {
             switch key {
             case "+switch-master":
                 self.application.logger.notice("NEW MASTER: \(message)")
-                self.discovery(id: id).map { _ in
+                self.discovery(id: id).map { newConfiguration in
+                    self.use(newConfiguration, as: id)
                     self.application.logger.notice("END DISCOVERY AFTER SWITCH MASTER")
                 }
                 
@@ -104,18 +105,13 @@ final class RedisStorage {
         }
     }
     
-    func discovery(id: RedisID) -> EventLoopFuture<Void> {
+    func discovery(id: RedisID) -> EventLoopFuture<RedisConfiguration> {
         self.application.logger.notice("START DISCOVERY")
         let sentinel = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
         
         let configuration = self.configuration(for: id)!
         let discover = RedisTopologyDiscover(sentinel: sentinel, configuration: configuration, logger: application.logger)
-        let future = discover.discovery(for: id)
-        future.whenSuccess { newConfiguration in
-            self.application.logger.notice("END DISCOVERY: \(newConfiguration)")
-            self.use(newConfiguration, as: id)
-        }
-        return future.map { _ in }
+        return discover.discovery(for: id)
     }
 }
 
@@ -202,7 +198,10 @@ extension RedisStorage {
                 switch configuration {
                 case .highAvailability:
                     application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
-                    try redisStorage.discovery(id: id).wait()
+                    let newConfiguration = try redisStorage.discovery(id: id).wait()
+                    
+                    redisStorage.use(newConfiguration, as: id)
+                    
                     try redisStorage.monitor(id: id).wait()
                     application.logger.notice("ATTACHED TO PUBSUB")
                     
