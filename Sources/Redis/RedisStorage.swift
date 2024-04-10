@@ -107,14 +107,14 @@ final class RedisStorage {
     func discovery(id: RedisID) -> EventLoopFuture<Void> {
         self.application.logger.notice("START DISCOVERY")
         let sentinel = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
-        let promise = sentinel.eventLoop.makePromise(of: Void.self)
         
         let configuration = self.configuration(for: id)!
         let discover = RedisTopologyDiscover(sentinel: sentinel, configuration: configuration)
-        return discover.discovery(for: id).map { newConfiguration in
+        let future = discover.discovery(for: id)
+        future.whenSuccess { newConfiguration in
             self.use(newConfiguration, as: id)
-            return promise.succeed()
         }
+        return future.map { _ in }
     }
 }
 

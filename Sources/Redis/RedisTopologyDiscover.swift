@@ -78,6 +78,7 @@ class RedisTopologyDiscover {
             )
         })
 
+        print("********, new config", newConfigurations)
         return .highAvailability(sentinel: sentinel, redis: newConfigurations)
     }
 }
