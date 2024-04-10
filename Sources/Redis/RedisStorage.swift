@@ -57,7 +57,6 @@ final class RedisStorage {
         case (let .highAvailability(sentinel: sentinelConfiguration, redis: _), .none):
             application.logger.trace("FIRST BOOT, we must discover network: \(sentinelConfiguration)")
             bootstrap(for: id, using: sentinelConfiguration)
-            monitor(id: id).always({ self.application.logger.notice("ATTACHED TO PUBSUB \($0)") })
         case let (.standalone(configuration), .none):
             bootstrap(for: id, using: configuration)
         default:
@@ -90,15 +89,11 @@ final class RedisStorage {
         return sentinel.psubscribe(to: "*") { key, message in
             switch key {
             case "+switch-master":
-                
                 self.application.logger.notice("NEW MASTER: \(message)")
-                self.application.logger.notice("START DISCOVERY")
-                
-                let configuration = self.configuration(for: id)!
-                let discover = RedisTopologyDiscover(sentinel: sentinel, configuration: configuration)
-                discover.discovery(for: id).map { newConfiguration in
-                    self.use(newConfiguration, as: id)
+                self.discovery(id: id).map { _ in
+                    self.application.logger.notice("END DISCOVERY AFTER SWITCH MASTER")
                 }
+                
             default:
                 self.application.logger.notice("CHANNEL: \(key) | \(message)")
             }
@@ -106,6 +101,19 @@ final class RedisStorage {
             self.application.logger.trace("SUB TO \(subscriptionKey)")
         } onUnsubscribe: { subscriptionKey, _ in
             self.application.logger.trace("UNSUB TO \(subscriptionKey)")
+        }
+    }
+    
+    func discovery(id: RedisID) -> EventLoopFuture<Void> {
+        self.application.logger.notice("START DISCOVERY")
+        let sentinel = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
+        let promise = sentinel.eventLoop.makePromise(of: Void.self)
+        
+        let configuration = self.configuration(for: id)!
+        let discover = RedisTopologyDiscover(sentinel: sentinel, configuration: configuration)
+        return discover.discovery(for: id).map { newConfiguration in
+            self.use(newConfiguration, as: id)
+            return promise.succeed()
         }
     }
 }
@@ -193,8 +201,10 @@ extension RedisStorage {
                 switch configuration {
                 case .highAvailability:
                     application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
-//                    try application.redis(id).discovery().wait()
-
+                    try redisStorage.discovery(id: id).wait()
+                    try redisStorage.monitor(id: id).wait()
+                    application.logger.notice("ATTACHED TO PUBSUB")
+                    
                 case .standalone:
                     break // NO FURTHER ACTIONS
                 }
