@@ -90,7 +90,7 @@ extension Application.Redis {
             }
     }
 
-    var sentinel: RedisClient {
+    public var sentinel: RedisClient {
         return pool(for: eventLoop, role: .sentinel)
     }
 
