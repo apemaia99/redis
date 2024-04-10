@@ -29,6 +29,8 @@ class RedisTopologyDiscover {
             guard let master = RedisClusterNodeID(fromRESP: value) else {
                 throw NSError(domain: "CANNOT GET MASTER NODE", code: -1)
             }
+            
+            self.logger.notice("MASTER: \(master)")
             return try RedisNode(endpoint: master.endpoint, port: master.port, useTLS: false, role: .master)
         }
 
@@ -49,6 +51,8 @@ class RedisTopologyDiscover {
                 let replica = try RedisNode(endpoint: node.endpoint, port: node.port, useTLS: false, role: .slave)
                 partial.append(replica)
             }
+            
+            self.logger.notice("NODES: \(replicas)")
             return replicaNodes
         }
 
