@@ -76,9 +76,9 @@ final class RedisStorage {
 
     func pool(for eventLoop: EventLoop, id redisID: RedisID, role: RedisRole) -> RedisConnectionPool {
         let key = PoolKey(eventLoopKey: eventLoop.key, redisID: redisID)
-        
+
         application.logger.notice("ASKING CLIENT FOR ROLE: \(role)")
-        
+
         guard let pools = pools[key],
               let pool = pools.first(where: { $0.role == role })?.pool
         else {
@@ -135,11 +135,15 @@ extension RedisStorage {
         for eventLoop in application.eventLoopGroup.makeIterator() {
             let key = PoolKey(eventLoopKey: eventLoop.key, redisID: id)
 
-            guard let idx = pools[key]?.firstIndex(where: { roles.contains($0.role) }),
-                  let pool = pools[key]?.remove(at: idx).pool
-            else { continue }
-            application.logger.trace("SHUTTING DOWN: \(pool)")
-            pool.close(promise: nil, logger: application.logger)
+            guard let pool = pools[key] else { continue }
+            pools[key]?.removeAll(where: { roles.contains($0.role) })
+
+            pool.filter({ roles.contains($0.role) })
+                .map(\.pool)
+                .forEach { pool in
+                    application.logger.trace("SHUTTING DOWN: \(pool)")
+                    pool.close(promise: nil, logger: application.logger)
+                }
         }
     }
 
@@ -176,7 +180,7 @@ extension RedisStorage {
                     }
                 }
         }()
-        
+
         logger.notice("CREATION OF POOL CONF IP:\(configuration.serverAddresses)")
 
         let newPool = RedisConnectionPool(
@@ -203,8 +207,8 @@ extension RedisStorage {
                 case .highAvailability:
                     application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
                     let newConfiguration = try redisStorage.discovery(id: id).wait()
-                    self.redisStorage.use(newConfiguration, as: id)
-                    try self.redisStorage.monitor(id: id).wait()
+                    redisStorage.use(newConfiguration, as: id)
+                    try redisStorage.monitor(id: id).wait()
                     application.logger.trace("SUBSCRIBED")
 
                 case .standalone:
