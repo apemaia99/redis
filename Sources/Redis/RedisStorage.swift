@@ -76,6 +76,9 @@ final class RedisStorage {
 
     func pool(for eventLoop: EventLoop, id redisID: RedisID, role: RedisRole) -> RedisConnectionPool {
         let key = PoolKey(eventLoopKey: eventLoop.key, redisID: redisID)
+        
+        application.logger.notice("ASKING CLIENT FOR ROLE: \(role)")
+        
         guard let pools = pools[key],
               let pool = pools.first(where: { $0.role == role })?.pool
         else {
