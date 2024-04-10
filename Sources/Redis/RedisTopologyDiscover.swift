@@ -3,7 +3,7 @@ import Redis
 import RediStack
 import Vapor
 
-struct RedisTopologyDiscover {
+class RedisTopologyDiscover {
     private let sentinel: RedisClient
     private let configuration: RedisConfiguration
     private let logger: Logger
@@ -13,9 +13,12 @@ struct RedisTopologyDiscover {
         self.configuration = configuration
         self.logger = logger
     }
+    
+    deinit {
+        logger.notice("DEINIT OF RedisTopologyDiscover")
+    }
 
     func discovery(for id: RedisID) -> EventLoopFuture<RedisConfiguration> {
-        let promise = sentinel.eventLoop.makePromise(of: RedisConfiguration.self)
         let master = sentinel.send(
             command: "SENTINEL",
             with: [
@@ -49,15 +52,13 @@ struct RedisTopologyDiscover {
             return replicaNodes
         }
 
-        master
+        return master
             .and(replicas)
             .map({ [$0] + $1 })
             .flatMapThrowing { nodes in
                 self.logger.notice("NEW NODES: \(nodes)")
-                try self.configuration(from: nodes)
+                return try self.configuration(from: nodes)
             }
-
-        return promise.futureResult
     }
 
     private func configuration(from topology: [RedisNode]) throws -> RedisConfiguration {

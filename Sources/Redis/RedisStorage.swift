@@ -90,10 +90,10 @@ final class RedisStorage {
             switch key {
             case "+switch-master":
                 self.application.logger.notice("NEW MASTER: \(message)")
-                let newConfiguration = try! self.discovery(id: id)
-                self.use(newConfiguration, as: id)
-                self.application.logger.notice("END DISCOVERY AFTER SWITCH MASTER")
-
+                self.discovery(id: id).map { newConfiguration in
+                    self.use(newConfiguration, as: id)
+                    self.application.logger.notice("END DISCOVERY AFTER SWITCH MASTER")
+                }
             default:
                 self.application.logger.notice("CHANNEL: \(key) | \(message)")
             }
@@ -104,13 +104,13 @@ final class RedisStorage {
         }
     }
 
-    func discovery(id: RedisID) throws -> RedisConfiguration {
+    func discovery(id: RedisID) -> EventLoopFuture<RedisConfiguration> {
         application.logger.notice("START DISCOVERY")
         let sentinel = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
 
         let configuration = self.configuration(for: id)!
         let discover = RedisTopologyDiscover(sentinel: sentinel, configuration: configuration, logger: application.logger)
-        return try discover.discovery(for: id).wait()
+        return discover.discovery(for: id)
     }
 }
 
@@ -197,13 +197,10 @@ extension RedisStorage {
                 switch configuration {
                 case .highAvailability:
                     application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
-                    let newConfiguration = try redisStorage.discovery(id: id)
-                    application.logger.notice("UPDATING...")
-                    redisStorage.use(newConfiguration, as: id)
-
-                    redisStorage.monitor(id: id).whenSuccess { _ in
-                        application.logger.notice("ATTACHED TO PUBSUB")
-                    }
+                    let newConfiguration = try redisStorage.discovery(id: id).wait()
+                    self.redisStorage.use(newConfiguration, as: id)
+                    try self.redisStorage.monitor(id: id).wait()
+                    application.logger.trace("SUBSCRIBED")
 
                 case .standalone:
                     break // NO FURTHER ACTIONS
