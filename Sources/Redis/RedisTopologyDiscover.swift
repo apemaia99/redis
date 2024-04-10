@@ -3,7 +3,7 @@ import Redis
 import RediStack
 import Vapor
 
-class RedisTopologyDiscover {
+struct RedisTopologyDiscover {
     private let sentinel: RedisClient
     private let configuration: RedisConfiguration
     private let logger: Logger
@@ -12,10 +12,6 @@ class RedisTopologyDiscover {
         self.sentinel = sentinel
         self.configuration = configuration
         self.logger = logger
-    }
-    
-    deinit {
-        logger.notice("DEINIT OF RedisTopologyDiscover")
     }
 
     func discovery(for id: RedisID) -> EventLoopFuture<RedisConfiguration> {
