@@ -198,13 +198,19 @@ extension RedisStorage {
                 switch configuration {
                 case .highAvailability:
                     application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
-                    redisStorage.discovery(id: id).whenSuccess { newConfiguration in
-                        application.logger.notice("UPDATING...")
-                        self.redisStorage.use(newConfiguration, as: id)
-                        self.redisStorage.monitor(id: id).whenSuccess { _ in
-                            application.logger.notice("ATTACHED TO PUBSUB")
+                    redisStorage.discovery(id: id)
+                        .whenComplete { result in
+                            switch result {
+                            case .success(let newConfiguration):
+                                application.logger.notice("UPDATING...")
+                                self.redisStorage.use(newConfiguration, as: id)
+                                self.redisStorage.monitor(id: id).whenSuccess { _ in
+                                    application.logger.notice("ATTACHED TO PUBSUB")
+                                }
+                            case .failure(let failure):
+                                application.logger.notice("FAILED discovery due to: \(failure)")
+                            }
                         }
-                    }
 
                 case .standalone:
                     break // NO FURTHER ACTIONS
