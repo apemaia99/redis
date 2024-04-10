@@ -43,10 +43,10 @@ final class RedisStorage {
     func use(_ redisConfiguration: RedisConfiguration, as id: RedisID = .default) {
         lock.lock()
         defer { lock.unlock() }
-        
+
         let newConfiguration = redisConfiguration
         let currentConfiguration = configurations[id]
-        
+
         switch (newConfiguration, currentConfiguration) {
         case (let .highAvailability(sentinel: _, redis: newConfigurations), .highAvailability):
             application.logger.trace("DISCOVERED NETWORK: \(newConfigurations)")
@@ -83,7 +83,7 @@ final class RedisStorage {
         }
         return pool
     }
-    
+
     private func monitor(id: RedisID) -> EventLoopFuture<Void> {
         let sentinel = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
         return sentinel.psubscribe(to: "*") { key, message in
@@ -94,7 +94,7 @@ final class RedisStorage {
                     self.use(newConfiguration, as: id)
                     self.application.logger.notice("END DISCOVERY AFTER SWITCH MASTER")
                 }
-                
+
             default:
                 self.application.logger.notice("CHANNEL: \(key) | \(message)")
             }
@@ -104,11 +104,11 @@ final class RedisStorage {
             self.application.logger.trace("UNSUB TO \(subscriptionKey)")
         }
     }
-    
+
     func discovery(id: RedisID) -> EventLoopFuture<RedisConfiguration> {
-        self.application.logger.notice("START DISCOVERY")
+        application.logger.notice("START DISCOVERY")
         let sentinel = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
-        
+
         let configuration = self.configuration(for: id)!
         let discover = RedisTopologyDiscover(sentinel: sentinel, configuration: configuration, logger: application.logger)
         return discover.discovery(for: id)
@@ -132,7 +132,7 @@ extension RedisStorage {
     private func shutdown(for id: RedisID, roles: Set<RedisRole>) {
         for eventLoop in application.eventLoopGroup.makeIterator() {
             let key = PoolKey(eventLoopKey: eventLoop.key, redisID: id)
-            
+
             guard let idx = pools[key]?.firstIndex(where: { roles.contains($0.role) }),
                   let pool = pools[key]?.remove(at: idx).pool
             else { continue }
@@ -198,13 +198,14 @@ extension RedisStorage {
                 switch configuration {
                 case .highAvailability:
                     application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
-                    let newConfiguration = try redisStorage.discovery(id: id).wait()
-                    
-                    redisStorage.use(newConfiguration, as: id)
-                    
-                    try redisStorage.monitor(id: id).wait()
-                    application.logger.notice("ATTACHED TO PUBSUB")
-                    
+                    redisStorage.discovery(id: id).whenSuccess { newConfiguration in
+                        application.logger.notice("UPDATING...")
+                        self.redisStorage.use(newConfiguration, as: id)
+                        self.redisStorage.monitor(id: id).whenSuccess { _ in
+                            application.logger.notice("ATTACHED TO PUBSUB")
+                        }
+                    }
+
                 case .standalone:
                     break // NO FURTHER ACTIONS
                 }
