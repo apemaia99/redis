@@ -6,10 +6,16 @@ import Vapor
 class RedisTopologyDiscover {
     private let sentinel: RedisClient
     private let configuration: RedisConfiguration
+    private let logger: Logger
 
-    init(sentinel: RedisClient, configuration: RedisConfiguration) {
+    init(sentinel: RedisClient, configuration: RedisConfiguration, logger: Logger) {
         self.sentinel = sentinel
         self.configuration = configuration
+        self.logger = logger
+    }
+    
+    deinit {
+        logger.notice("DEINIT OF RedisTopologyDiscover")
     }
 
     func discovery(for id: RedisID) -> EventLoopFuture<RedisConfiguration> {
@@ -51,7 +57,7 @@ class RedisTopologyDiscover {
             .and(replicas)
             .map({ [$0] + $1 })
             .flatMapThrowing { nodes in
-                print("********, new nodes", nodes)
+                self.logger.notice("NEW NODES: \(nodes)")
                 try self.configuration(from: nodes)
             }
 
@@ -79,7 +85,7 @@ class RedisTopologyDiscover {
             )
         })
 
-        print("********, new config", newConfigurations)
+        logger.notice("NEW CONFIG: \(newConfigurations)")
         return .highAvailability(sentinel: sentinel, redis: newConfigurations)
     }
 }

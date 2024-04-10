@@ -109,7 +109,7 @@ final class RedisStorage {
         let sentinel = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
         
         let configuration = self.configuration(for: id)!
-        let discover = RedisTopologyDiscover(sentinel: sentinel, configuration: configuration)
+        let discover = RedisTopologyDiscover(sentinel: sentinel, configuration: configuration, logger: application.logger)
         let future = discover.discovery(for: id)
         future.whenSuccess { newConfiguration in
             self.application.logger.notice("END DISCOVERY: \(newConfiguration)")
