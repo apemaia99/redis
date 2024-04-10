@@ -112,6 +112,7 @@ final class RedisStorage {
         let discover = RedisTopologyDiscover(sentinel: sentinel, configuration: configuration)
         let future = discover.discovery(for: id)
         future.whenSuccess { newConfiguration in
+            self.application.logger.notice("END DISCOVERY: \(newConfiguration)")
             self.use(newConfiguration, as: id)
         }
         return future.map { _ in }

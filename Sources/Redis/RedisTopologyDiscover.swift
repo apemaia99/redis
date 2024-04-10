@@ -51,6 +51,7 @@ class RedisTopologyDiscover {
             .and(replicas)
             .map({ [$0] + $1 })
             .flatMapThrowing { nodes in
+                print("********, new nodes", nodes)
                 try self.configuration(from: nodes)
             }
 
