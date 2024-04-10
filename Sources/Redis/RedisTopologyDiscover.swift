@@ -5,13 +5,15 @@ import Vapor
 
 class RedisTopologyDiscover {
     private let sentinel: RedisClient
+    private let configuration: RedisConfiguration
 
-    init(sentinel: RedisClient) {
+    init(sentinel: RedisClient, configuration: RedisConfiguration) {
         self.sentinel = sentinel
+        self.configuration = configuration
     }
 
-    func discovery(for id: RedisID) -> EventLoopFuture<[RedisNode]> {
-        let promise = sentinel.eventLoop.makePromise(of: [RedisNode].self)
+    func discovery(for id: RedisID) -> EventLoopFuture<RedisConfiguration> {
+        let promise = sentinel.eventLoop.makePromise(of: RedisConfiguration.self)
         let master = sentinel.send(
             command: "SENTINEL",
             with: [
@@ -45,57 +47,38 @@ class RedisTopologyDiscover {
             return replicaNodes
         }
 
-        master.and(replicas).whenComplete { result in
-            switch result {
-            case let .success((newMaster, replicas)):
-                promise.succeed([newMaster] + replicas)
-            case let .failure(error):
-                promise.fail(error)
+        master
+            .and(replicas)
+            .map({ [$0] + $1 })
+            .flatMapThrowing { nodes in
+                try self.configuration(from: nodes)
             }
-        }
 
         return promise.futureResult
     }
-}
 
-extension Application.Redis {
-    func discovery() -> EventLoopFuture<Void> {
-        let cluster = RedisTopologyDiscover(sentinel: sentinel)
+    private func configuration(from topology: [RedisNode]) throws -> RedisConfiguration {
+        guard case let .highAvailability(sentinel, redis) = configuration else {
+            throw NSError(domain: "INVALID CONFIG", code: -1)
+        }
 
-        return cluster
-            .discovery(for: id)
-            .flatMapThrowing { nodes in
-                switch configuration {
-                case let .highAvailability(sentinel: sentinelConfiguration, redis: currentConfiguration):
-                    guard let master = currentConfiguration.first(where: { $0.role == .master }) else {
-                        fatalError()
-                    }
-                    
-                    let newConfigurations = try nodes.map({
-                        return try RedisConfiguration.Configuration(
-                            serverAddresses: [$0.socketAddress],
-                            password: master.password,
-                            tlsConfiguration: master.tlsConfiguration,
-                            tlsHostname: master.tlsHostname,
-                            database: master.database,
-                            role: $0.role,
-                            pool: master.pool
-                        )
-                    })
-                    
-                    self.configuration = .highAvailability(sentinel: sentinelConfiguration, redis: newConfigurations)
-                case .standalone, .some, .none:
-                    break
-                }
-            }
-    }
+        guard let master = redis.first(where: { $0.role == .master }) else {
+            throw NSError(domain: "NO MASTER IN CONFIG", code: -1)
+        }
 
-    public var sentinel: RedisClient {
-        return pool(for: eventLoop, role: .sentinel)
-    }
+        let newConfigurations = try topology.map({
+            try RedisConfiguration.Configuration(
+                serverAddresses: [$0.socketAddress],
+                password: master.password,
+                tlsConfiguration: master.tlsConfiguration,
+                tlsHostname: master.tlsHostname,
+                database: master.database,
+                role: $0.role,
+                pool: master.pool
+            )
+        })
 
-    var master: RedisClient {
-        return pool(for: eventLoop, role: .master)
+        return .highAvailability(sentinel: sentinel, redis: newConfigurations)
     }
 }
 

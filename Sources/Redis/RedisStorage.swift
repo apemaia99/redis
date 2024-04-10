@@ -86,11 +86,19 @@ final class RedisStorage {
     }
     
     private func monitor(id: RedisID) -> EventLoopFuture<Void> {
-        let client = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
-        return client.psubscribe(to: "*") { key, message in
+        let sentinel = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
+        return sentinel.psubscribe(to: "*") { key, message in
             switch key {
             case "+switch-master":
+                
                 self.application.logger.notice("NEW MASTER: \(message)")
+                self.application.logger.notice("START DISCOVERY")
+                
+                let configuration = self.configuration(for: id)!
+                let discover = RedisTopologyDiscover(sentinel: sentinel, configuration: configuration)
+                discover.discovery(for: id).map { newConfiguration in
+                    self.use(newConfiguration, as: id)
+                }
             default:
                 self.application.logger.notice("CHANNEL: \(key) | \(message)")
             }
@@ -184,8 +192,8 @@ extension RedisStorage {
             for (id, configuration) in redisStorage.configurations {
                 switch configuration {
                 case .highAvailability:
-                    application.logger.trace("START DISCOVERY FOR: \(id)")
-                    try application.redis(id).discovery().wait()
+                    application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
+//                    try application.redis(id).discovery().wait()
 
                 case .standalone:
                     break // NO FURTHER ACTIONS
