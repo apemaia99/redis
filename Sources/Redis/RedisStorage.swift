@@ -57,6 +57,7 @@ final class RedisStorage {
         case (let .highAvailability(sentinel: sentinelConfiguration, redis: _), .none):
             application.logger.trace("FIRST BOOT, we must discover network: \(sentinelConfiguration)")
             bootstrap(for: id, using: sentinelConfiguration)
+            monitor(id: id).always({ self.application.logger.notice("ATTACHED TO PUBSUB \($0)") })
         case let (.standalone(configuration), .none):
             bootstrap(for: id, using: configuration)
         default:
@@ -82,6 +83,22 @@ final class RedisStorage {
             fatalError("No redis found for id \(redisID), or the app may not have finished booting. Also, the eventLoop must be from Application's EventLoopGroup.")
         }
         return pool
+    }
+    
+    private func monitor(id: RedisID) -> EventLoopFuture<Void> {
+        let client = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
+        return client.psubscribe(to: "*") { key, message in
+            switch key {
+            case "+switch-master":
+                self.application.logger.notice("NEW MASTER: \(message)")
+            default:
+                self.application.logger.notice("CHANNEL: \(key) | \(message)")
+            }
+        } onSubscribe: { subscriptionKey, _ in
+            self.application.logger.trace("SUB TO \(subscriptionKey)")
+        } onUnsubscribe: { subscriptionKey, _ in
+            self.application.logger.trace("UNSUB TO \(subscriptionKey)")
+        }
     }
 }
 
