@@ -52,15 +52,19 @@ final class RedisStorage {
         switch (newConfiguration, currentConfiguration) {
         case (let .highAvailability(sentinel: _, redis: newConfigurations), .highAvailability):
             application.logger.trace("DISCOVERED NETWORK: \(newConfigurations)")
+            
             shutdown(for: id, roles: [.master, .slave])
             for nodeConfiguration in newConfigurations {
                 bootstrap(for: id, using: nodeConfiguration)
             }
         case (let .highAvailability(sentinel: sentinelConfiguration, redis: _), .none):
             application.logger.trace("FIRST BOOT, we must discover network: \(sentinelConfiguration)")
+            
             bootstrap(for: id, using: sentinelConfiguration)
+            monitoring.withLockedValue({ $0[id] = false })
         case let (.standalone(configuration), .none):
             bootstrap(for: id, using: configuration)
+            monitoring.withLockedValue({ $0[id] = false })
         default:
             fatalError("OUT OF CONTEXT")
         }
@@ -93,9 +97,9 @@ final class RedisStorage {
 
     private func monitor(eventLoop: EventLoop, id: RedisID) -> EventLoopFuture<Void> {
         guard case .highAvailability = configurations[id] else {
-            
             return eventLoop.makeSucceededVoidFuture()
         }
+        
         self.application.logger.notice("REQUESTED CLIENT FOR HA, CHECK IF MONITORED")
         guard monitoring.withLockedValue({ $0[id] }) == true else {
             self.application.logger.notice("ALREADY ATTACHED, DO NOTHING")
