@@ -68,7 +68,7 @@ final class RedisStorage {
         lock.lock()
         defer { lock.unlock() }
 
-        application.logger.notice("REQUEST CLIENT FOR ID: \(redisID), ROLE: \(role)")
+        application.logger.notice("REQUESTED CLIENT FOR ID: \(redisID), ROLE: \(role)")
         let key = PoolKey(eventLoopKey: eventLoop.key, redisID: redisID)
 
         guard let pools = pools[key],
@@ -78,20 +78,33 @@ final class RedisStorage {
             fatalError("No redis found for id \(redisID), or the app may not have finished booting. Also, the eventLoop must be from Application's EventLoopGroup.")
         }
 
-        if case let .highAvailability(_, redis) = configuration, client.role != .sentinel {
-            monitor(eventLoop: eventLoop, id: redisID, configuration: redis.configuration)
+        if case let .highAvailability(sentinel, redis) = configuration, client.role != .sentinel {
+            monitor(eventLoop: eventLoop, id: redisID) {
+                self.discovery(eventLoop: eventLoop, id: redisID, sentinelConfiguration: sentinel.configuration, redisConfiguration: redis.configuration)
+            }
         }
 
         return client.pool
     }
 
-    fileprivate func discovery(id: RedisID, configuration: RedisMode.Configuration) -> EventLoopFuture<Void> {
+    fileprivate func discovery(eventLoop: EventLoop, id: RedisID, sentinelConfiguration: RedisMode.Configuration, redisConfiguration: RedisMode.Configuration) -> EventLoopFuture<Void> {
         application.logger.notice("START DISCOVERY")
-        let sentinel = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
-        let discover = RedisTopologyDiscover(sentinel: sentinel, configuration: configuration, logger: application.logger)
-        return discover.discovery(for: id).map {
-            self.refresh(nodes: $0, for: id)
-        }
+        let sentinel = pool(for: eventLoop, id: id, role: .sentinel)
+        let discover = RedisTopologyDiscover(
+            sentinel: sentinel,
+            sentinelConfiguration: sentinelConfiguration,
+            redisConfiguration: redisConfiguration,
+            logger: application.logger
+        )
+        return discover.discovery(for: id)
+            .map {
+                self.application.logger.notice("END DISCOVERY")
+                self.refresh(nodes: $0, for: id)
+                self.application.logger.notice("REFRESHED TOPOLOGY")
+                self.monitor(eventLoop: eventLoop, id: id) {
+                    self.discovery(eventLoop: eventLoop, id: id, sentinelConfiguration: sentinelConfiguration, redisConfiguration: redisConfiguration)
+                }
+            }
     }
 }
 
@@ -129,7 +142,7 @@ extension RedisStorage {
     private func refresh(nodes: [RedisNode], for id: RedisID) {
         lock.lock()
         defer { lock.unlock() }
-        
+
         let nodesConfigurations = nodes.map(\.configuration)
         shutdown(for: id, roles: [.master, .slave])
         for nodeConfiguration in nodesConfigurations {
@@ -137,7 +150,7 @@ extension RedisStorage {
         }
     }
 
-    private func monitor(eventLoop: EventLoop, id: RedisID, configuration: RedisMode.Configuration) -> EventLoopFuture<Void> {
+    private func monitor(eventLoop: EventLoop, id: RedisID, masterChanged: @escaping () -> Void) -> EventLoopFuture<Void> {
         application.logger.notice("REQUESTED CLIENT FOR HA, CHECK IF MONITORED")
 
         let monitored = monitoring.withLockedValue { monitors in
@@ -157,11 +170,9 @@ extension RedisStorage {
             switch key {
             case "+switch-master":
                 self.application.logger.notice("NEW MASTER: \(message)")
-                self.discovery(id: id, configuration: configuration).map {
-                    self.application.logger.notice("END DISCOVERY AFTER SWITCH MASTER")
-                }
+                masterChanged()
             default:
-                self.application.logger.notice("CHANNEL: \(key) | \(message)")
+                self.application.logger.notice("REDIS ID:\(id), CHANNEL: \(key) | \(message)")
             }
         } onSubscribe: { subscriptionKey, _ in
             self.application.logger.trace("SUBSCRIBED TO \(subscriptionKey)")
@@ -234,10 +245,14 @@ extension RedisStorage {
                 switch configuration {
                 case .standalone:
                     break // Nothing to do
-                case let .highAvailability(sentinel: _, redis: redis):
+                case let .highAvailability(sentinel, redis):
                     application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
-                    let newConfiguration = try redisStorage.discovery(id: id, configuration: redis.configuration).wait()
-                    try redisStorage.monitor(eventLoop: application.eventLoopGroup.next(), id: id, configuration: redis.configuration).wait()
+                    let newConfiguration = try redisStorage.discovery(
+                        eventLoop: application.eventLoopGroup.next(),
+                        id: id,
+                        sentinelConfiguration: sentinel.configuration,
+                        redisConfiguration: redis.configuration
+                    ).wait()
                     application.logger.trace("SUBSCRIBED")
                 }
             }

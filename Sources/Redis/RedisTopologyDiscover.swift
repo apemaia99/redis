@@ -5,16 +5,18 @@ import Vapor
 
 class RedisTopologyDiscover {
     private let sentinel: RedisClient
-    private let configuration: RedisMode.Configuration
+    private let sentinelConfiguration: RedisMode.Configuration
+    private let redisConfiguration: RedisMode.Configuration
     private let logger: Logger
     
     private var masterName: String? {
-        configuration.masterName
+        sentinelConfiguration.masterName
     }
 
-    init(sentinel: RedisClient, configuration: RedisMode.Configuration, logger: Logger) {
+    init(sentinel: RedisClient, sentinelConfiguration: RedisMode.Configuration, redisConfiguration: RedisMode.Configuration, logger: Logger) {
         self.sentinel = sentinel
-        self.configuration = configuration
+        self.sentinelConfiguration = sentinelConfiguration
+        self.redisConfiguration = redisConfiguration
         self.logger = logger
     }
 
@@ -35,7 +37,7 @@ class RedisTopologyDiscover {
             }
 
             self.logger.notice("MASTER: \(master)")
-            return try RedisNode(endpoint: master.endpoint, port: master.port, role: .master, previousConfiguration: self.configuration)
+            return try RedisNode(endpoint: master.endpoint, port: master.port, role: .master, previousConfiguration: self.redisConfiguration)
         }
 
         let replicas = sentinel.send(
@@ -54,7 +56,7 @@ class RedisTopologyDiscover {
                     throw NSError(domain: "CANNOT GET REPLICAS NODES", code: -1)
                 }
 
-                let replica = try RedisNode(endpoint: node.endpoint, port: node.port, role: .slave, previousConfiguration: self.configuration)
+                let replica = try RedisNode(endpoint: node.endpoint, port: node.port, role: .slave, previousConfiguration: self.redisConfiguration)
                 partial.append(replica)
             }
 
