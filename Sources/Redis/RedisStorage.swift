@@ -46,23 +46,27 @@ final class RedisStorage {
         lock.lock()
         defer { lock.unlock() }
 
+        // 1) Store copy of new and current configuration
         let newConfiguration = redisConfiguration
         let currentConfiguration = configurations[id]
 
+        // 2) check if an update is requested or if is new
         switch (newConfiguration, currentConfiguration) {
         case (let .highAvailability(sentinel: _, redis: newConfigurations), .highAvailability):
             application.logger.trace("DISCOVERED NETWORK: \(newConfigurations)")
-            
+            // 2A) Update HA topology (OFF AND ON for all nodes with sentinel exceptions)
             shutdown(for: id, roles: [.master, .slave])
             for nodeConfiguration in newConfigurations {
                 bootstrap(for: id, using: nodeConfiguration)
             }
         case (let .highAvailability(sentinel: sentinelConfiguration, redis: _), .none):
+            // 2B) New HA configuration
             application.logger.trace("FIRST BOOT, we must discover network: \(sentinelConfiguration)")
             
             bootstrap(for: id, using: sentinelConfiguration)
             monitoring.withLockedValue({ $0[id] = false })
         case let (.standalone(configuration), .none):
+            // 2C) New standalone configuration
             bootstrap(for: id, using: configuration)
             monitoring.withLockedValue({ $0[id] = false })
         default:
@@ -91,7 +95,10 @@ final class RedisStorage {
             fatalError("No redis found for id \(redisID), or the app may not have finished booting. Also, the eventLoop must be from Application's EventLoopGroup.")
         }
         
-        monitor(eventLoop: eventLoop, id: redisID)
+        // CHECK if sentinel pubSub was dropped meanwhile
+        if role != .sentinel {
+            monitor(eventLoop: eventLoop, id: redisID)
+        }
         return pool
     }
 
