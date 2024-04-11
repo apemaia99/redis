@@ -26,6 +26,7 @@ final class RedisStorage {
     private let application: Application
     private var lock: NIOLock
     fileprivate var configurations: [RedisID: RedisConfiguration]
+    fileprivate var monitoring: NIOLockedValueBox<[RedisID: Bool]>
     fileprivate var pools: [PoolKey: [Pool]]
 
     struct Pool {
@@ -37,6 +38,7 @@ final class RedisStorage {
         application = app
         lock = .init()
         configurations = [:]
+        monitoring = .init([:])
         pools = [:]
     }
 
@@ -84,10 +86,23 @@ final class RedisStorage {
         else {
             fatalError("No redis found for id \(redisID), or the app may not have finished booting. Also, the eventLoop must be from Application's EventLoopGroup.")
         }
+        
+        monitor(eventLoop: eventLoop, id: redisID)
         return pool
     }
 
-    private func monitor(id: RedisID) -> EventLoopFuture<Void> {
+    private func monitor(eventLoop: EventLoop, id: RedisID) -> EventLoopFuture<Void> {
+        guard case .highAvailability = configurations[id] else {
+            
+            return eventLoop.makeSucceededVoidFuture()
+        }
+        self.application.logger.notice("REQUESTED CLIENT FOR HA, CHECK IF MONITORED")
+        guard monitoring.withLockedValue({ $0[id] }) == true else {
+            self.application.logger.notice("ALREADY ATTACHED, DO NOTHING")
+            return eventLoop.makeSucceededVoidFuture()
+        }
+        
+        self.application.logger.notice("NOT ATTACHED, TRY MONITORING")
         let sentinel = pool(for: application.eventLoopGroup.next(), id: id, role: .sentinel)
         return sentinel.psubscribe(to: "*") { key, message in
             switch key {
@@ -102,8 +117,10 @@ final class RedisStorage {
             }
         } onSubscribe: { subscriptionKey, _ in
             self.application.logger.trace("SUB TO \(subscriptionKey)")
+            self.monitoring.withLockedValue({ $0[id] = true })
         } onUnsubscribe: { subscriptionKey, _ in
             self.application.logger.trace("UNSUB TO \(subscriptionKey)")
+            self.monitoring.withLockedValue({ $0[id] = false })
         }
     }
 
@@ -208,7 +225,7 @@ extension RedisStorage {
                     application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
                     let newConfiguration = try redisStorage.discovery(id: id).wait()
                     redisStorage.use(newConfiguration, as: id)
-                    try redisStorage.monitor(id: id).wait()
+                    try redisStorage.monitor(eventLoop: application.eventLoopGroup.next(), id: id).wait()
                     application.logger.trace("SUBSCRIBED")
 
                 case .standalone:
