@@ -53,6 +53,7 @@ final class RedisStorage {
             bootstrap(for: id, using: configuration)
         case let .highAvailability(sentinel, _):
             bootstrap(for: id, using: sentinel.configuration)
+            monitoring.withLockedValue { $0[id] = true }
         }
     }
 
