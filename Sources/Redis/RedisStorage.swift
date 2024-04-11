@@ -101,7 +101,7 @@ final class RedisStorage {
         }
         
         self.application.logger.notice("REQUESTED CLIENT FOR HA, CHECK IF MONITORED")
-        guard monitoring.withLockedValue({ $0[id] }) == true else {
+        guard monitoring.withLockedValue({ $0[id] }) == false else {
             self.application.logger.notice("ALREADY ATTACHED, DO NOTHING")
             return eventLoop.makeSucceededVoidFuture()
         }
