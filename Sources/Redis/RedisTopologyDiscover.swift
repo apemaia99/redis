@@ -5,53 +5,59 @@ import Vapor
 
 class RedisTopologyDiscover {
     private let sentinel: RedisClient
-    private let configuration: RedisConfiguration
+    private let configuration: RedisMode.Configuration
     private let logger: Logger
+    
+    private var masterName: String? {
+        configuration.masterName
+    }
 
-    init(sentinel: RedisClient, configuration: RedisConfiguration, logger: Logger) {
+    init(sentinel: RedisClient, configuration: RedisMode.Configuration, logger: Logger) {
         self.sentinel = sentinel
         self.configuration = configuration
         self.logger = logger
     }
-    
+
     deinit {
         logger.notice("DEINIT OF RedisTopologyDiscover")
     }
 
-    func discovery(for id: RedisID) -> EventLoopFuture<RedisConfiguration> {
+    func discovery(for id: RedisID) -> EventLoopFuture<[RedisNode]> {
         let master = sentinel.send(
             command: "SENTINEL",
             with: [
                 "MASTER".convertedToRESPValue(),
-                "mymaster".convertedToRESPValue(),
+                masterName.convertedToRESPValue(),
             ]
         ).flatMapThrowing { value -> RedisNode in
             guard let master = RedisClusterNodeID(fromRESP: value) else {
                 throw NSError(domain: "CANNOT GET MASTER NODE", code: -1)
             }
-            
+
             self.logger.notice("MASTER: \(master)")
-            return try RedisNode(endpoint: master.endpoint, port: master.port, useTLS: false, role: .master)
+            return try RedisNode(endpoint: master.endpoint, port: master.port, role: .master, previousConfiguration: self.configuration)
         }
 
         let replicas = sentinel.send(
             command: "SENTINEL",
             with: [
                 "REPLICAS".convertedToRESPValue(),
-                "mymaster".convertedToRESPValue(),
+                masterName.convertedToRESPValue(),
             ]
         ).flatMapThrowing { value -> [RedisNode] in
-            guard case let .array(replicas) = value else { return [] }
+            guard case let .array(replicas) = value else {
+                return [] // error
+            }
 
             let replicaNodes = try replicas.reduce(into: [RedisNode]()) { partial, response in
                 guard let node = RedisClusterNodeID(fromRESP: response) else {
                     throw NSError(domain: "CANNOT GET REPLICAS NODES", code: -1)
                 }
 
-                let replica = try RedisNode(endpoint: node.endpoint, port: node.port, useTLS: false, role: .slave)
+                let replica = try RedisNode(endpoint: node.endpoint, port: node.port, role: .slave, previousConfiguration: self.configuration)
                 partial.append(replica)
             }
-            
+
             self.logger.notice("NODES: \(replicas)")
             return replicaNodes
         }
@@ -59,35 +65,10 @@ class RedisTopologyDiscover {
         return master
             .and(replicas)
             .map({ [$0] + $1 })
-            .flatMapThrowing { nodes in
+            .map { nodes in
                 self.logger.notice("NEW NODES: \(nodes)")
-                return try self.configuration(from: nodes)
+                return nodes
             }
-    }
-
-    private func configuration(from topology: [RedisNode]) throws -> RedisConfiguration {
-        guard case let .highAvailability(sentinel, redis) = configuration else {
-            throw NSError(domain: "INVALID CONFIG", code: -1)
-        }
-
-        guard let master = redis.first(where: { $0.role == .master }) else {
-            throw NSError(domain: "NO MASTER IN CONFIG", code: -1)
-        }
-
-        let newConfigurations = try topology.map({
-            try RedisConfiguration.Configuration(
-                serverAddresses: [$0.socketAddress],
-                password: master.password,
-                tlsConfiguration: master.tlsConfiguration,
-                tlsHostname: master.tlsHostname,
-                database: master.database,
-                role: $0.role,
-                pool: master.pool
-            )
-        })
-
-        logger.notice("NEW CONFIG: \(newConfigurations)")
-        return .highAvailability(sentinel: sentinel, redis: newConfigurations)
     }
 }
 
@@ -96,21 +77,41 @@ import Redis
 import RediStack
 
 public struct RedisNode: RedisClusterNodeDescriptionProtocol {
-    public let host: String? = nil
-    public let ip: String? = nil
+    public let host: String? = nil // USELESS
+    public let ip: String? = nil // USELESS
+    public let useTLS: Bool = false // USELESS
+
     public let endpoint: String
     public let port: Int
-    public let useTLS: Bool
     public let role: RedisRole
 
+    private let previousConfiguration: RedisMode.Configuration
     public let socketAddress: SocketAddress
 
-    public init(endpoint: String, port: Int = 6379, useTLS: Bool, role: RedisRole) throws {
+    public init(endpoint: String, port: Int, role: RedisRole, previousConfiguration: RedisMode.Configuration) throws {
         self.endpoint = endpoint
         self.port = port
-        self.useTLS = useTLS
         self.role = role
+        self.previousConfiguration = previousConfiguration
         socketAddress = try .makeAddressResolvingHost(self.endpoint, port: self.port)
+    }
+
+    public var configuration: RedisMode.Configuration {
+        return .init(
+            role: role,
+            serverAddresses: [socketAddress],
+            password: previousConfiguration.password,
+            database: previousConfiguration.database,
+            pool: previousConfiguration.pool,
+            tlsConfiguration: previousConfiguration.tlsConfiguration,
+            tlsHostname: previousConfiguration.tlsHostname
+        )
+    }
+}
+
+extension RedisNode {
+    public static func == (lhs: RedisNode, rhs: RedisNode) -> Bool {
+        false
     }
 }
 
@@ -131,19 +132,5 @@ extension RedisClusterNodeID: RESPValueConvertible {
     public func convertedToRESPValue() -> RediStack.RESPValue {
         let endpoint = ByteBuffer(string: endpoint)
         return .array([.simpleString(endpoint), .integer(port)])
-    }
-}
-
-extension RedisClient {
-    @inlinable
-    public func master(_ name: RedisKey) -> EventLoopFuture<RedisClusterNodeID?> {
-        return send(command: "SENTINEL GET-MASTER-ADDR-BY-NAME \(name)")
-            .map { return .init(fromRESP: $0) }
-    }
-
-    @inlinable
-    public func role() -> EventLoopFuture<RedisRole?> {
-        return send(command: "ROLE")
-            .map { return .init(fromRESP: $0) }
     }
 }

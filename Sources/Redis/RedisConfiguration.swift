@@ -5,26 +5,38 @@ import NIOPosix
 import NIOSSL
 import RediStack
 
-/// Configuration mode for connecting to a Redis instance
-public enum RedisConfiguration {
-    case standalone(Configuration)
-    case highAvailability(sentinel: Configuration, redis: [Configuration])
+// How redis works
+public enum RedisMode {
+    public typealias PoolOptions = Configuration.PoolOptions
+    public typealias ValidationError = RedisConnection.Configuration.ValidationError
+
+    case standalone(Redis.RedisMode.Configuration)
+    case highAvailability(sentinel: Redis.RedisMode.SentinelConfiguration, redis: Redis.RedisMode.RedisConfiguration)
 }
 
-extension RedisConfiguration {
+// Configuration: TODO protocol or classes
+extension RedisMode {
     /// Configuration for connecting to a Redis instance
     public struct Configuration {
-        public typealias ValidationError = RedisConnection.Configuration.ValidationError
-
         public let role: RedisRole
-        public var serverAddresses: [SocketAddress]
-        public var password: String?
-        public var database: Int?
-        public var pool: PoolOptions
-        public var tlsConfiguration: TLSConfiguration?
-        public var tlsHostname: String?
+        public let serverAddresses: [SocketAddress]
+        public let password: String?
+        public let database: Int?
+        public let pool: PoolOptions
+        public let tlsConfiguration: TLSConfiguration?
+        public let tlsHostname: String?
+        public let masterName: String?
 
-        fileprivate init(role: RedisRole, serverAddresses: [SocketAddress], password: String? = nil, database: Int? = nil, pool: PoolOptions, tlsConfiguration: TLSConfiguration? = nil, tlsHostname: String? = nil) {
+        public init(
+            role: RedisRole,
+            serverAddresses: [SocketAddress],
+            password: String? = nil,
+            database: Int? = nil,
+            pool: PoolOptions,
+            tlsConfiguration: TLSConfiguration? = nil,
+            tlsHostname: String? = nil,
+            masterName: String? = nil
+        ) {
             self.role = role
             self.serverAddresses = serverAddresses
             self.password = password
@@ -32,39 +44,61 @@ extension RedisConfiguration {
             self.pool = pool
             self.tlsConfiguration = tlsConfiguration
             self.tlsHostname = tlsHostname
+            self.masterName = masterName
         }
     }
-}
 
-extension RedisConfiguration.Configuration {
-    /// Configuration pool options
-    public struct PoolOptions {
-        public var maximumConnectionCount: RedisConnectionPoolSize
-        public var minimumConnectionCount: Int
-        public var connectionBackoffFactor: Float32
-        public var initialConnectionBackoffDelay: TimeAmount
-        public var connectionRetryTimeout: TimeAmount?
-        public var onUnexpectedConnectionClose: ((RedisConnection) -> Void)?
+    /// Configuration for connecting to a Redis sentinel
+    public struct SentinelConfiguration {
+        public let configuration: RedisMode.Configuration
 
         public init(
-            maximumConnectionCount: RedisConnectionPoolSize = .maximumActiveConnections(2),
-            minimumConnectionCount: Int = 0,
-            connectionBackoffFactor: Float32 = 2,
-            initialConnectionBackoffDelay: TimeAmount = .milliseconds(100),
-            connectionRetryTimeout: TimeAmount? = nil,
-            onUnexpectedConnectionClose: ((RedisConnection) -> Void)? = nil
+            serverAddresses: [SocketAddress],
+            password: String? = nil,
+            pool: PoolOptions = .init(),
+            tlsConfiguration: TLSConfiguration? = nil,
+            tlsHostname: String? = nil,
+            masterName: String = "mymaster"
         ) {
-            self.maximumConnectionCount = maximumConnectionCount
-            self.minimumConnectionCount = minimumConnectionCount
-            self.connectionBackoffFactor = connectionBackoffFactor
-            self.initialConnectionBackoffDelay = initialConnectionBackoffDelay
-            self.connectionRetryTimeout = connectionRetryTimeout
-            self.onUnexpectedConnectionClose = onUnexpectedConnectionClose
+            configuration = .init(
+                role: .sentinel,
+                serverAddresses: serverAddresses,
+                password: password,
+                database: nil,
+                pool: pool,
+                tlsConfiguration: tlsConfiguration,
+                tlsHostname: tlsHostname,
+                masterName: masterName
+            )
+        }
+    }
+
+    /// Configuration for connecting to a Redis standard after sentinel discovery
+    public struct RedisConfiguration {
+        public let configuration: RedisMode.Configuration
+
+        public init(
+            password: String? = nil,
+            database: Int? = nil,
+            pool: PoolOptions = .init(),
+            tlsConfiguration: TLSConfiguration? = nil,
+            tlsHostname: String? = nil
+        ) {
+            configuration = .init(
+                role: .master,
+                serverAddresses: [],
+                password: password,
+                database: database,
+                pool: pool,
+                tlsConfiguration: tlsConfiguration,
+                tlsHostname: tlsHostname
+            )
         }
     }
 }
 
-extension RedisConfiguration.Configuration {
+// Factories
+extension RedisMode {
     public init(url string: String, tlsConfiguration: TLSConfiguration? = nil, pool: PoolOptions = .init()) throws {
         guard let url = URL(string: string) else { throw ValidationError.invalidURLString }
         try self.init(url: url, tlsConfiguration: tlsConfiguration, pool: pool)
@@ -125,48 +159,50 @@ extension RedisConfiguration.Configuration {
         role: RedisRole = .master,
         pool: PoolOptions = .init()
     ) throws {
-        self.role = role
-        self.serverAddresses = serverAddresses
-        self.password = password
-        self.database = database
-        self.pool = pool
-        self.tlsConfiguration = tlsConfiguration
-        self.tlsHostname = tlsHostname
+        self = .standalone(
+            .init(
+                role: role,
+                serverAddresses: serverAddresses,
+                password: password,
+                database: database,
+                pool: pool,
+                tlsConfiguration: tlsConfiguration,
+                tlsHostname: tlsHostname
+            )
+        )
     }
 }
 
-extension RedisConfiguration {
-    public static func standalone(configuration: Self.Configuration) throws -> RedisConfiguration {
-        return .standalone(configuration)
-    }
+extension RedisMode.Configuration {
+    /// Configuration pool options
+    public struct PoolOptions {
+        public var maximumConnectionCount: RedisConnectionPoolSize
+        public var minimumConnectionCount: Int
+        public var connectionBackoffFactor: Float32
+        public var initialConnectionBackoffDelay: TimeAmount
+        public var connectionRetryTimeout: TimeAmount?
+        public var onUnexpectedConnectionClose: ((RedisConnection) -> Void)?
 
-    public static func cluster(sentinelConfiguration: Self.Configuration, redisConfiguration: Self.Configuration) throws -> RedisConfiguration {
-        let sentinel = try RedisConfiguration.Configuration(
-            role: .sentinel,
-            serverAddresses: sentinelConfiguration.serverAddresses,
-            password: sentinelConfiguration.password,
-            database: nil,
-            pool: sentinelConfiguration.pool,
-            tlsConfiguration: sentinelConfiguration.tlsConfiguration,
-            tlsHostname: sentinelConfiguration.tlsHostname
-        )
-
-        let redis = try RedisConfiguration.Configuration(
-            role: .master,
-            serverAddresses: redisConfiguration.serverAddresses,
-            password: redisConfiguration.password,
-            database: redisConfiguration.database,
-            pool: redisConfiguration.pool,
-            tlsConfiguration: redisConfiguration.tlsConfiguration,
-            tlsHostname: redisConfiguration.tlsHostname
-        )
-
-        return .highAvailability(sentinel: sentinel, redis: [redis])
+        public init(
+            maximumConnectionCount: RedisConnectionPoolSize = .maximumActiveConnections(2),
+            minimumConnectionCount: Int = 0,
+            connectionBackoffFactor: Float32 = 2,
+            initialConnectionBackoffDelay: TimeAmount = .milliseconds(100),
+            connectionRetryTimeout: TimeAmount? = nil,
+            onUnexpectedConnectionClose: ((RedisConnection) -> Void)? = nil
+        ) {
+            self.maximumConnectionCount = maximumConnectionCount
+            self.minimumConnectionCount = minimumConnectionCount
+            self.connectionBackoffFactor = connectionBackoffFactor
+            self.initialConnectionBackoffDelay = initialConnectionBackoffDelay
+            self.connectionRetryTimeout = connectionRetryTimeout
+            self.onUnexpectedConnectionClose = onUnexpectedConnectionClose
+        }
     }
 }
 
 extension RedisConnectionPool.Configuration {
-    internal init(_ config: RedisConfiguration.Configuration, defaultLogger: Logger, customClient: ClientBootstrap?) {
+    internal init(_ config: RedisMode.Configuration, defaultLogger: Logger, customClient: ClientBootstrap?) {
         self.init(
             initialServerConnectionAddresses: config.serverAddresses,
             maximumConnectionCount: config.pool.maximumConnectionCount,

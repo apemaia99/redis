@@ -4,7 +4,7 @@ extension Application.Redis {
     /// The Redis configuration to use to communicate with a Redis instance.
     ///
     /// See `Application.Redis.id`
-    public var configuration: RedisConfiguration? {
+    public var configuration: RedisMode? {
         get {
             self.application.redisStorage.configuration(for: self.id)
         }
