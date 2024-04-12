@@ -1,8 +1,9 @@
 import Foundation
+import RediStack
 
-protocol RedisClusterMonitorProviding {
+protocol RedisClusterMonitorProviding: AnyObject {
     var delegate: RedisClusterMonitoringDelegate? { get set }
 
-    func start(for id: RedisID, sentinel: RedisClient)
-    func stop(for id: RedisID)
+    func start(using sentinel: RedisClient)
+    func stop(using sentinel: RedisClient)
 }

@@ -1,7 +1,9 @@
 import Foundation
+import RediStack
 
 protocol RedisClusterMonitoringDelegate: AnyObject {
-    func monitoring(changed status: MonitoringStatus, for id: RedisID)
+    func monitoring(changed status: MonitoringStatus)
 
-    func switchMaster(from oldMaster: RedisClusterNodeID, to newMaster: RedisClusterNodeID, for id: RedisID)
+    func switchMaster(from oldMaster: RedisClusterNodeID, to newMaster: RedisClusterNodeID)
+    func detected(replica: RedisClusterNodeID, relatedTo master: RedisClusterNodeID)
 }
