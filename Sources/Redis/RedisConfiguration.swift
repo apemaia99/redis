@@ -14,12 +14,11 @@ public enum RedisMode {
     case highAvailability(sentinel: Redis.RedisMode.SentinelConfiguration, redis: Redis.RedisMode.RedisConfiguration)
 }
 
-// Configuration: TODO protocol or classes
 extension RedisMode {
     /// Configuration for connecting to a Redis instance
     public struct Configuration {
-        public internal(set) var role: RedisRole
-        public internal(set) var serverAddresses: [SocketAddress]
+        public let role: RedisRole
+        public let serverAddresses: [SocketAddress]
         public let password: String?
         public let database: Int?
         public let pool: PoolOptions
@@ -46,10 +45,18 @@ extension RedisMode {
             self.tlsHostname = tlsHostname
             self.masterName = masterName
         }
-        
-        mutating func update(using node: RedisClusterNodeID, as role: RedisRole) throws {
-            self.role = role
-            serverAddresses = try [.makeAddressResolvingHost(node.endpoint, port: node.port)]
+
+        func generate(using node: RedisNode) throws -> Self {
+            return try.init(
+                role: node.role,
+                serverAddresses: [.makeAddressResolvingHost(node.endpoint, port: node.port)],
+                password: password,
+                database: database,
+                pool: pool,
+                tlsConfiguration: tlsConfiguration,
+                tlsHostname: tlsHostname,
+                masterName: masterName
+            )
         }
     }
 
