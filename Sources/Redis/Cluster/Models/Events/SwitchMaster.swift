@@ -11,16 +11,17 @@ struct SwitchMaster: RESPValueConvertible {
     let new: RedisClusterNodeID
 
     init?(fromRESP value: RESPValue) {
-        guard
-            let masters = value.array,
-            masters.count == Self.expectedMessageSize
-        else { return nil }
+        guard let response = value.string else { return nil }
 
-        guard
-            let oldEndpoint = masters[1].string,
-            let oldPort = masters[2].int,
-            let newEndpoint = masters[3].string,
-            let newPort = masters[4].int
+        let switchMaster = response.split(separator: " ")
+
+        guard switchMaster.count == Self.expectedMessageSize else { return nil }
+
+        let oldEndpoint = String(switchMaster[1])
+        let newEndpoint = String(switchMaster[3])
+
+        guard let oldPort = Int(switchMaster[2]),
+              let newPort = Int(switchMaster[4])
         else { return nil }
 
         old = .init(endpoint: oldEndpoint, port: oldPort)

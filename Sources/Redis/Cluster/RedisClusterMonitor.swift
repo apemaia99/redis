@@ -2,8 +2,8 @@ import Foundation
 import NIOConcurrencyHelpers
 
 final class RedisClusterMonitor: RedisClusterMonitorProviding {
-    private var status: NIOLockedValueBox<[RedisID: MonitoringStatus]>
-    private var logger: Logger
+    private let status: NIOLockedValueBox<[RedisID: MonitoringStatus]>
+    private let logger: Logger
     weak var delegate: RedisClusterMonitoringDelegate?
 
     init(logger: Logger) {
@@ -13,9 +13,28 @@ final class RedisClusterMonitor: RedisClusterMonitorProviding {
     }
 
     func start(for id: RedisID, sentinel: RedisClient) {
+        let monitored = status.withLockedValue { status -> MonitoringStatus in
+            switch status[id] {
+            case .none:
+                status[id] = .inactive
+                return .inactive
+            case .inactive:
+                // ACT AS LOCK DURING SUBSCRIPTION
+                status[id] = .active
+                return .inactive
+            case .active:
+                return .active
+            }
+        }
+
+        guard case .inactive = monitored else {
+            logger.notice("MONITOR ALREADY ACTIVE, NOTHING TO DO")
+            return
+        }
+
         sentinel.psubscribe(to: "*") { key, message in
             self.handle(key, message, for: id)
-        } onSubscribe: { subscriptionKey, s in
+        } onSubscribe: { subscriptionKey, _ in
             self.logger.trace("SUBSCRIBED TO \(subscriptionKey)")
             self.change(to: .active, for: id)
         } onUnsubscribe: { subscriptionKey, _ in

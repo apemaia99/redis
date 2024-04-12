@@ -18,8 +18,8 @@ public enum RedisMode {
 extension RedisMode {
     /// Configuration for connecting to a Redis instance
     public struct Configuration {
-        public let role: RedisRole
-        public let serverAddresses: [SocketAddress]
+        public internal(set) var role: RedisRole
+        public internal(set) var serverAddresses: [SocketAddress]
         public let password: String?
         public let database: Int?
         public let pool: PoolOptions
@@ -45,6 +45,11 @@ extension RedisMode {
             self.tlsConfiguration = tlsConfiguration
             self.tlsHostname = tlsHostname
             self.masterName = masterName
+        }
+        
+        mutating func update(using node: RedisClusterNodeID, as role: RedisRole) throws {
+            self.role = role
+            serverAddresses = try [.makeAddressResolvingHost(node.endpoint, port: node.port)]
         }
     }
 
