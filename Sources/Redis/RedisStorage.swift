@@ -25,44 +25,27 @@ extension Application {
 final class RedisStorage {
     private let application: Application
     private var lock: NIOLock
-    private var configurations: [RedisID: RedisMode] = [:]
-    private var monitoring: NIOLockedValueBox<[RedisID: Bool]>
-    private var pools: [PoolKey: [Pool]]
-
-    struct Pool {
-        let pool: RedisConnectionPool
-        let role: RedisRole
-    }
+    private var clusters: [RedisID: RedisCluster]
 
     init(app: Application) {
         application = app
         lock = .init()
-        configurations = [:]
-        monitoring = .init([:])
-        pools = [:]
+        clusters = [:]
     }
 
     func use(_ mode: RedisMode, as id: RedisID = .default) {
         lock.lock()
         defer { lock.unlock() }
 
-        configurations[id] = mode
-
-        switch mode {
-        case let .standalone(configuration):
-            bootstrap(for: id, using: configuration)
-        case let .highAvailability(sentinel, _):
-            bootstrap(for: id, using: sentinel.configuration)
-            monitoring.withLockedValue { $0[id] = false }
-        }
+        clusters[id] = .init(id: id, mode: mode, application: application, monitoring: RedisClusterMonitor(logger: application.logger))
     }
 
     func configuration(for id: RedisID = .default) -> RedisMode? {
-        lock.withLock { configurations[id] }
+        lock.withLock { clusters[id]?.mode }
     }
 
     func ids() -> Set<RedisID> {
-        lock.withLock { Set(configurations.keys) }
+        lock.withLock { Set(clusters.keys) }
     }
 
     func pool(for eventLoop: EventLoop, id redisID: RedisID, role: RedisRole) -> RedisConnectionPool {
@@ -70,165 +53,9 @@ final class RedisStorage {
         defer { lock.unlock() }
 
         application.logger.notice("REQUESTED CLIENT FOR ID: \(redisID), ROLE: \(role)")
-        let key = PoolKey(eventLoopKey: eventLoop.key, redisID: redisID)
+        guard let cluster = clusters[redisID] else { fatalError("Instance of \(redisID) not configured") }
 
-        guard let pools = pools[key],
-              let client = pools.first(where: { $0.role == role }),
-              let configuration = configurations[redisID]
-        else {
-            fatalError("No redis found for id \(redisID), or the app may not have finished booting. Also, the eventLoop must be from Application's EventLoopGroup.")
-        }
-
-        if case let .highAvailability(sentinel, redis) = configuration, client.role != .sentinel {
-            monitor(eventLoop: eventLoop, id: redisID) {
-                self.discovery(eventLoop: eventLoop, id: redisID, sentinelConfiguration: sentinel.configuration, redisConfiguration: redis.configuration)
-            }
-        }
-
-        return client.pool
-    }
-
-    fileprivate func discovery(eventLoop: EventLoop, id: RedisID, sentinelConfiguration: RedisMode.Configuration, redisConfiguration: RedisMode.Configuration) -> EventLoopFuture<Void> {
-        application.logger.notice("START DISCOVERY")
-        let sentinel = pool(for: eventLoop, id: id, role: .sentinel)
-        let discover = RedisTopologyDiscover(
-            sentinel: sentinel,
-            sentinelConfiguration: sentinelConfiguration,
-            redisConfiguration: redisConfiguration,
-            logger: application.logger
-        )
-        return discover.discovery(for: id)
-            .map {
-                self.application.logger.notice("END DISCOVERY")
-                self.refresh(nodes: $0, for: id)
-                self.application.logger.notice("REFRESHED TOPOLOGY")
-                self.monitor(eventLoop: eventLoop, id: id) {
-                    self.discovery(eventLoop: eventLoop, id: id, sentinelConfiguration: sentinelConfiguration, redisConfiguration: redisConfiguration)
-                }
-            }
-    }
-}
-
-extension RedisStorage {
-    private func bootstrap(for id: RedisID, using configuration: RedisMode.Configuration) {
-        let newPool = makePools(for: id, using: configuration)
-
-        for (key, pool) in newPool {
-            if pools[key] != nil {
-                application.logger.trace("RUNTIME UPDATE FOR: \(key)")
-                pools[key]?.append(contentsOf: pool)
-            } else {
-                application.logger.trace("BOOTSTRAP: \(pool)")
-                pools[key] = pool
-            }
-        }
-    }
-
-    private func shutdown(for id: RedisID, roles: Set<RedisRole>) {
-        for eventLoop in application.eventLoopGroup.makeIterator() {
-            let key = PoolKey(eventLoopKey: eventLoop.key, redisID: id)
-
-            guard let pool = pools[key] else { continue }
-            pools[key]?.removeAll(where: { roles.contains($0.role) })
-
-            pool.filter({ roles.contains($0.role) })
-                .map(\.pool)
-                .forEach { pool in
-                    application.logger.trace("SHUTTING DOWN: \(pool)")
-                    pool.close(promise: nil, logger: application.logger)
-                }
-        }
-    }
-
-    private func refresh(nodes: [RedisNode], for id: RedisID) {
-        lock.lock()
-        defer { lock.unlock() }
-
-        let nodesConfigurations = nodes.map(\.configuration)
-        shutdown(for: id, roles: [.master, .slave])
-        for nodeConfiguration in nodesConfigurations {
-            bootstrap(for: id, using: nodeConfiguration)
-        }
-    }
-
-    private func monitor(eventLoop: EventLoop, id: RedisID, masterChanged: @escaping () -> Void) -> EventLoopFuture<Void> {
-        application.logger.notice("REQUESTED CLIENT FOR HA, CHECK IF MONITORED")
-
-        let monitored = monitoring.withLockedValue { monitors in
-            let monitored = monitors[id] ?? true
-            if !monitored { monitors[id] = true } // ACT AS LOCK DURING SUBSCRIPTION
-            return monitored
-        }
-
-        guard !monitored else {
-            application.logger.notice("MONITOR ALREADY ACTIVE, NOTHING TO DO")
-            return eventLoop.makeSucceededVoidFuture()
-        }
-
-        application.logger.notice("NOT ATTACHED, TRY MONITORING")
-        let sentinel = pool(for: eventLoop, id: id, role: .sentinel)
-        return sentinel.psubscribe(to: "*") { key, message in
-            switch key {
-            case "+switch-master":
-                self.application.logger.notice("NEW MASTER: \(message)")
-                masterChanged()
-            default:
-                self.application.logger.notice("REDIS ID:\(id), CHANNEL: \(key) | \(message)")
-            }
-        } onSubscribe: { subscriptionKey, _ in
-            self.application.logger.trace("SUBSCRIBED TO \(subscriptionKey)")
-            self.monitoring.withLockedValue({ $0[id] = true })
-        } onUnsubscribe: { subscriptionKey, _ in
-            self.application.logger.trace("UNSUBSCRIBED FROM \(subscriptionKey)")
-            self.monitoring.withLockedValue({ $0[id] = false })
-        }.recover { error in
-            self.application.logger.trace("SUBSCRIBE FAILED DUE TO: \(error)")
-            self.monitoring.withLockedValue({ $0[id] = false })
-        }
-    }
-
-    private func makePools(for id: RedisID, using configuration: RedisMode.Configuration) -> [PoolKey: [Pool]] {
-        var newPools: [PoolKey: [Pool]] = [:]
-
-        for eventLoop in application.eventLoopGroup.makeIterator() {
-            let newKey: PoolKey = PoolKey(eventLoopKey: eventLoop.key, redisID: id)
-            let newPool: RedisConnectionPool = makePool(using: configuration, on: eventLoop, logger: application.logger)
-
-            newPools[newKey] = [.init(pool: newPool, role: configuration.role)]
-        }
-
-        return newPools
-    }
-
-    private func makePool(using configuration: RedisMode.Configuration, on eventLoop: EventLoop, logger: Logger) -> RedisConnectionPool {
-        let redisTLSClient: ClientBootstrap? = {
-            guard let tlsConfig = configuration.tlsConfiguration,
-                  let tlsHost = configuration.tlsHostname else { return nil }
-
-            return ClientBootstrap(group: eventLoop)
-                .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
-                .channelInitializer { channel in
-                    do {
-                        let sslContext = try NIOSSLContext(configuration: tlsConfig)
-                        return EventLoopFuture.andAllSucceed([
-                            channel.pipeline.addHandler(try NIOSSLClientHandler(context: sslContext,
-                                                                                serverHostname: tlsHost)),
-                            channel.pipeline.addBaseRedisHandlers(),
-                        ], on: channel.eventLoop)
-                    } catch {
-                        return channel.eventLoop.makeFailedFuture(error)
-                    }
-                }
-        }()
-
-        logger.notice("CREATION OF POOL CONF IP:\(configuration.serverAddresses)")
-
-        let newPool = RedisConnectionPool(
-            configuration: .init(configuration, defaultLogger: logger, customClient: redisTLSClient),
-            boundEventLoop: eventLoop
-        )
-
-        return newPool
+        return cluster.pool(for: eventLoop, role: role)
     }
 }
 
@@ -241,21 +68,22 @@ extension RedisStorage {
             self.redisStorage = redisStorage
         }
 
+        func willBoot(_ application: Application) throws {
+            redisStorage.clusters.values.forEach({ $0.bootstrap() })
+        }
+
         func didBoot(_ application: Application) throws {
-            for (id, configuration) in redisStorage.configurations {
-                switch configuration {
+            try redisStorage.clusters.filter { _, cluster in
+                switch cluster.mode {
+                case .highAvailability:
+                    return true
                 case .standalone:
-                    break // Nothing to do
-                case let .highAvailability(sentinel, redis):
-                    application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
-                    let newConfiguration = try redisStorage.discovery(
-                        eventLoop: application.eventLoopGroup.next(),
-                        id: id,
-                        sentinelConfiguration: sentinel.configuration,
-                        redisConfiguration: redis.configuration
-                    ).wait()
-                    application.logger.trace("SUBSCRIBED")
+                    return false
                 }
+            }.forEach { id, cluster in
+                application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
+                try cluster.discovery(for: application.eventLoopGroup.next()).wait()
+                application.logger.trace("END BOOT DISCOVERY FOR: \(id)")
             }
         }
 
@@ -264,14 +92,10 @@ extension RedisStorage {
             redisStorage.lock.lock()
             defer { self.redisStorage.lock.unlock() }
 
-            let shutdownFuture: EventLoopFuture<Void> = redisStorage.pools
-                .flatMap(\.value)
-                .map(\.pool)
-                .map { pool in
-                    let promise = pool.eventLoop.makePromise(of: Void.self)
-                    pool.close(promise: promise)
-                    return promise.futureResult
-                }.flatten(on: application.eventLoopGroup.next())
+            let eventLoop = application.eventLoopGroup.next()
+            let shutdownFuture = redisStorage.clusters.values
+                .map({ $0.shutdown(on: eventLoop) })
+                .flatten(on: eventLoop)
 
             do {
                 try shutdownFuture.wait()
@@ -279,23 +103,5 @@ extension RedisStorage {
                 application.logger.error("Error shutting down redis connection pools, possibly because the pool never connected to the Redis server: \(error)")
             }
         }
-    }
-}
-
-private extension RedisStorage {
-    /// Since a `RedisConnectionPool` is created for each `RedisID` on each `EventLoop`, combining
-    /// the `RedisID` and the `EventLoop` into one key simplifies the storage dictionary
-    struct PoolKey: Hashable, StorageKey {
-        typealias Value = RedisConnectionPool
-
-        let eventLoopKey: EventLoop.Key
-        let redisID: RedisID
-    }
-}
-
-private extension EventLoop {
-    typealias Key = ObjectIdentifier
-    var key: Key {
-        ObjectIdentifier(self)
     }
 }
