@@ -3,61 +3,94 @@ import NIOConcurrencyHelpers
 import RediStack
 
 final class RedisClusterMonitor: RedisClusterMonitorProviding {
-    private let status: NIOLockedValueBox<MonitoringStatus>
+    private let status: NIOLockedValueBox<Status>
     private let logger: Logger
     weak var delegate: RedisClusterMonitoringDelegate?
 
+    private struct Status {
+        private(set) var previousState: MonitoringStatus
+        private(set) var currentState: MonitoringStatus
+
+        mutating func set(state: MonitoringStatus) {
+            previousState = currentState
+            currentState = state
+        }
+    }
+
     init(logger: Logger) {
-        status = .init(.inactive)
+        status = .init(.init(previousState: .inactive, currentState: .inactive))
         self.logger = logger
-        delegate = nil
     }
 
     func start(using sentinel: RedisClient) {
-        let monitored = status.withLockedValue { status -> Bool in
-            switch status {
-            case .active:
+        let shouldSubscribe = status.withLockedValue { fsm -> Bool in
+            switch fsm.currentState {
+            case .inactive, .failed, .dropped:
+                fsm.set(state: .subscribing)
                 return true
-            case .inactive:
-                status = .subscribing
-                // ACT AS LOCK WHILE SUBSCRIBE IS IN PROGRESS
+            case .active, .subscribing, .unsubscribing:
                 return false
-            case .subscribing:
-                return true
             }
         }
 
-        guard !monitored else {
-            logger.notice("MONITOR ALREADY ACTIVE, NOTHING TO DO")
-            return
+        guard shouldSubscribe else {
+            return logger.debug("Already monitoring")
         }
 
-        sentinel.psubscribe(to: "*") { key, message in
-            self.handle(key, message)
-        } onSubscribe: { subscriptionKey, _ in
-            self.logger.trace("SUBSCRIBED TO \(subscriptionKey)")
-            self.change(to: .active)
-        } onUnsubscribe: { subscriptionKey, _ in
-            self.logger.trace("UNSUBSCRIBED FROM \(subscriptionKey)")
-            self.change(to: .inactive)
-        }.recover { error in
+        notify(.subscribing)
+
+        sentinel.psubscribe(
+            to: "*",
+            messageReceiver: handle,
+            onSubscribe: subscribed,
+            onUnsubscribe: unsubscribed
+        ).recover { error in
             self.logger.trace("SUBSCRIBE FAILED DUE TO: \(error)")
-            self.change(to: .inactive)
+            self.change(to: .failed)
         }
     }
 
     func stop(using sentinel: RedisClient) {
-        sentinel
-            .punsubscribe()
-            .whenSuccess {
+        change(to: .unsubscribing)
+        sentinel.punsubscribe()
+            .recover { error in
+                self.logger.trace("UNSUBSCRIBE FAILED DUE TO: \(error)")
                 self.change(to: .inactive)
             }
     }
 }
 
 extension RedisClusterMonitor {
+    private func subscribed(_ subscriptionKey: String, _ currentSubscriptionCount: Int) {
+        logger.trace("SUBSCRIBED TO \(subscriptionKey) | count \(currentSubscriptionCount)")
+        switch status.withLockedValue({ $0.previousState }) {
+        case .failed:
+            change(to: .active)
+            delegate?.monitoring(shouldRefreshTopology: true)
+        default:
+            change(to: .active)
+            delegate?.monitoring(shouldRefreshTopology: false)
+        }
+    }
+
+    private func unsubscribed(_ subscriptionKey: String, _ currentSubscriptionCount: Int) {
+        logger.trace("UNSUBSCRIBED FROM \(subscriptionKey) | count \(currentSubscriptionCount)")
+        switch status.withLockedValue({ $0.currentState }) {
+        case .unsubscribing:
+            change(to: .inactive)
+        default:
+            change(to: .dropped)
+        }
+    }
+}
+
+extension RedisClusterMonitor {
     private func change(to status: MonitoringStatus) {
-        self.status.withLockedValue({ $0 = status })
+        self.status.withLockedValue({ $0.set(state: status) })
+        notify(status)
+    }
+
+    private func notify(_ status: MonitoringStatus) {
         delegate?.monitoring(changed: status)
     }
 

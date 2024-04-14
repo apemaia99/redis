@@ -1,7 +1,11 @@
 import Foundation
 
 enum MonitoringStatus {
-    case active
     case inactive
     case subscribing
+    case active
+    case unsubscribing
+    
+    case failed
+    case dropped
 }

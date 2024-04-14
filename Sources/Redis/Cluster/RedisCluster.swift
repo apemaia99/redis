@@ -139,6 +139,17 @@ final class RedisCluster {
 extension RedisCluster: RedisClusterMonitoringDelegate {
     func monitoring(changed status: MonitoringStatus) {
         application.logger.notice("MONITOR: \(status) FOR: \(id)")
+
+        guard status == .dropped, let sentinel = sentinel[application.eventLoopGroup.next().key]
+        else { return }
+
+        monitoring.start(using: sentinel)
+    }
+
+    func monitoring(shouldRefreshTopology: Bool) {
+        application.logger.notice("Monitoring suggest to refresh topology: \(shouldRefreshTopology)")
+        guard shouldRefreshTopology else { return }
+        discovery(for: application.eventLoopGroup.next())
     }
 
     func switchMaster(from oldMaster: RediStack.RedisClusterNodeID, to newMaster: RediStack.RedisClusterNodeID) {
