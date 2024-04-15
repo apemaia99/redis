@@ -34,7 +34,7 @@ final class RedisClusterMonitor: RedisClusterMonitorProviding {
         }
 
         guard shouldSubscribe else {
-            return logger.debug("Already monitoring")
+            return logger.trace("Already monitoring")
         }
 
         notify(.subscribing)
@@ -45,7 +45,7 @@ final class RedisClusterMonitor: RedisClusterMonitorProviding {
             onSubscribe: subscribed,
             onUnsubscribe: unsubscribed
         ).recover { error in
-            self.logger.trace("SUBSCRIBE FAILED DUE TO: \(error)")
+            self.logger.error("subscribe to sentinel events failed: \(error)")
             self.change(to: .failed)
         }
     }
@@ -54,7 +54,7 @@ final class RedisClusterMonitor: RedisClusterMonitorProviding {
         change(to: .unsubscribing)
         sentinel.punsubscribe()
             .recover { error in
-                self.logger.trace("UNSUBSCRIBE FAILED DUE TO: \(error)")
+                self.logger.error("unsubscribe from sentinel events failed: \(error)")
                 self.change(to: .inactive)
             }
     }
@@ -62,7 +62,14 @@ final class RedisClusterMonitor: RedisClusterMonitorProviding {
 
 extension RedisClusterMonitor {
     private func subscribed(_ subscriptionKey: String, _ currentSubscriptionCount: Int) {
-        logger.trace("SUBSCRIBED TO \(subscriptionKey) | count \(currentSubscriptionCount)")
+        logger.info(
+            "subscribed to sentinel events",
+            metadata: [
+                "channels": .string(subscriptionKey),
+                "subscribed count": .stringConvertible(currentSubscriptionCount),
+            ]
+        )
+
         switch status.withLockedValue({ $0.previousState }) {
         case .failed:
             change(to: .active)
@@ -74,7 +81,14 @@ extension RedisClusterMonitor {
     }
 
     private func unsubscribed(_ subscriptionKey: String, _ currentSubscriptionCount: Int) {
-        logger.trace("UNSUBSCRIBED FROM \(subscriptionKey) | count \(currentSubscriptionCount)")
+        logger.info(
+            "unsubscribed from sentinel events",
+            metadata: [
+                "channels": .string(subscriptionKey),
+                "subscribed count": .stringConvertible(currentSubscriptionCount),
+            ]
+        )
+
         switch status.withLockedValue({ $0.currentState }) {
         case .unsubscribing:
             change(to: .inactive)
@@ -91,6 +105,7 @@ extension RedisClusterMonitor {
     }
 
     private func notify(_ status: MonitoringStatus) {
+        logger.trace("changed monitoring status", metadata: ["status": .stringConvertible(status)])
         delegate?.monitoring(changed: status)
     }
 
@@ -103,7 +118,7 @@ extension RedisClusterMonitor {
             guard let replica = SentinelEvents.NewReplica(fromRESP: message) else { return }
             delegate?.detected(replica: replica.replica, relatedTo: replica.master)
         default:
-            logger.notice("CHANNEL: \(publisher) | \(message)")
+            logger.notice("Sentinel: \(message)", metadata: ["channel": .stringConvertible(publisher)])
         }
     }
 }

@@ -37,7 +37,15 @@ final class RedisStorage {
         lock.lock()
         defer { lock.unlock() }
 
-        clusters[id] = .init(id: id, mode: mode, application: application, monitoring: RedisClusterMonitor(logger: application.logger))
+        let commonMetadata = Logger.MetadataProvider({ ["id": .stringConvertible(id)] })
+        var monitoringLogger = Logger(label: "vapor.redis.cluster.monitoring", metadataProvider: commonMetadata)
+        var clusterLogger = Logger(label: "vapor.redis.cluster", metadataProvider: commonMetadata)
+        monitoringLogger.logLevel = application.logger.logLevel
+        clusterLogger.logLevel = application.logger.logLevel
+
+        let monitoring = RedisClusterMonitor(logger: monitoringLogger)
+
+        clusters[id] = .init(application: application, mode: mode, logger: clusterLogger, monitoring: monitoring)
     }
 
     func configuration(for id: RedisID = .default) -> RedisMode? {
@@ -52,7 +60,6 @@ final class RedisStorage {
         lock.lock()
         defer { lock.unlock() }
 
-        application.logger.notice("REQUESTED CLIENT FOR ID: \(redisID), ROLE: \(role)")
         guard let cluster = clusters[redisID] else { fatalError("Instance of \(redisID) not configured") }
 
         return cluster.pool(for: eventLoop, role: role)
@@ -80,10 +87,8 @@ extension RedisStorage {
                 case .standalone:
                     return false
                 }
-            }.forEach { id, cluster in
-                application.logger.trace("START BOOT DISCOVERY FOR: \(id)")
+            }.forEach { _, cluster in
                 try cluster.discovery(for: application.eventLoopGroup.next()).wait()
-                application.logger.trace("END BOOT DISCOVERY FOR: \(id)")
             }
         }
 

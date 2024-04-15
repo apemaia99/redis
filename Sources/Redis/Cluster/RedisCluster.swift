@@ -8,7 +8,6 @@ import Vapor
 final class RedisCluster {
     fileprivate typealias PoolKey = EventLoop.Key
 
-    let id: RedisID
     let mode: RedisMode
 
     private var master: [PoolKey: RedisConnectionPool]
@@ -16,13 +15,14 @@ final class RedisCluster {
     private var replicas: [RedisClusterNodeID: [PoolKey: RedisConnectionPool]]
 
     private let application: Application
+    private let logger: Logger
     private let monitoring: RedisClusterMonitorProviding
     private let lock: NIOLock
 
-    init(id: RedisID, mode: RedisMode, application: Application, monitoring: RedisClusterMonitorProviding) {
-        self.id = id
+    init(application: Application, mode: RedisMode, logger: Logger, monitoring: RedisClusterMonitorProviding) {
         self.mode = mode
         self.application = application
+        self.logger = logger
         self.monitoring = monitoring
         master = [:]
         sentinel = [:]
@@ -35,10 +35,10 @@ final class RedisCluster {
         lock.lock()
         defer { lock.unlock() }
 
-        application.logger.notice("REQUESTED CLIENT FOR ID: \(id), ROLE: \(role)")
-
         let key = eventLoop.key
         let connection: RedisConnectionPool?
+
+        logger.debug("picking client from pool", metadata: ["role": .stringConvertible(role), "eventLoop": .string(key.debugDescription)])
 
         switch role {
         case .master:
@@ -55,6 +55,7 @@ final class RedisCluster {
 
         if case .highAvailability = mode, role != .sentinel {
             if let sentinel = sentinel[eventLoop.key] {
+                logger.trace("trigger cluster monitor", metadata: ["sentinel": .stringConvertible(sentinel.id)])
                 monitoring.start(using: sentinel)
             }
         }
@@ -63,7 +64,7 @@ final class RedisCluster {
     }
 
     func discovery(for eventLoop: EventLoop) -> EventLoopFuture<Void> {
-        application.logger.notice("START DISCOVERY for ID: \(id)")
+        logger.trace("start cluster discovery")
 
         guard
             case let .highAvailability(sentinelConfiguration, _) = mode,
@@ -77,33 +78,35 @@ final class RedisCluster {
             return eventLoop.makeFailedFuture(NSError(domain: "MISSING SENTINEL", code: -1))
         }
 
-        let discover = RedisTopologyDiscover(sentinel: sentinel, masterName: name, logger: application.logger)
+        let discover = RedisTopologyDiscover(sentinel: sentinel, masterName: name, logger: logger)
 
         return discover.discovery()
-            .map { nodes in
-                self.application.logger.notice("END DISCOVERY")
+            .flatMapThrowing { nodes in
+                self.logger.trace("end of cluster discovery")
                 for node in nodes {
-                    self.refresh(of: node)
+                    try self.refresh(of: node)
                 }
-                self.application.logger.notice("REFRESHED TOPOLOGY")
+                self.logger.notice("updated topology")
                 self.monitoring.start(using: sentinel)
             }
     }
 
     func bootstrap() {
-        application.logger.trace("BOOTSTRAP of \(id)")
+        logger.trace("requested bootstrap of redis")
         switch mode {
         case let .standalone(configuration):
+            logger.debug("standalone mode")
             let newPool = makePools(using: configuration)
             master = newPool
         case let .highAvailability(sentinel, _):
+            logger.debug("highAvailability mode")
             let newPool = makePools(using: sentinel.configuration)
             self.sentinel = newPool
         }
     }
 
     func shutdown(on eventLoop: EventLoop) -> EventLoopFuture<Void> {
-        application.logger.trace("SHUTTING DOWN: \(id)")
+        logger.trace("requested shutdown of redis")
 
         let master = master.values
         let sentinel = sentinel.values
@@ -115,19 +118,19 @@ final class RedisCluster {
 
         let masterShutdownFutures = master.map {
             let promise = $0.eventLoop.makePromise(of: Void.self)
-            $0.close(promise: promise, logger: application.logger)
+            $0.close(promise: promise, logger: logger)
             return promise.futureResult
         }.flatten(on: eventLoop)
 
         let sentinelShutdownFutures = sentinel.map {
             let promise = $0.eventLoop.makePromise(of: Void.self)
-            $0.close(promise: promise, logger: application.logger)
+            $0.close(promise: promise, logger: logger)
             return promise.futureResult
         }.flatten(on: eventLoop)
 
         let replicaShutdownFutures = replicas.map {
             let promise = $0.eventLoop.makePromise(of: Void.self)
-            $0.close(promise: promise, logger: application.logger)
+            $0.close(promise: promise, logger: logger)
             return promise.futureResult
         }.flatten(on: eventLoop)
 
@@ -138,72 +141,71 @@ final class RedisCluster {
 
 extension RedisCluster: RedisClusterMonitoringDelegate {
     func monitoring(changed status: MonitoringStatus) {
-        application.logger.notice("MONITOR: \(status) FOR: \(id)")
+        logger.info("cluster monitor status change", metadata: ["status": .stringConvertible(status)])
 
-        guard status == .dropped, let sentinel = sentinel[application.eventLoopGroup.next().key]
-        else { return }
+        guard status == .dropped, let sentinel = sentinel[application.eventLoopGroup.next().key] else { return }
 
+        logger.info("monitor lost, trying another sentinel")
         monitoring.start(using: sentinel)
     }
 
     func monitoring(shouldRefreshTopology: Bool) {
-        application.logger.notice("Monitoring suggest to refresh topology: \(shouldRefreshTopology)")
+        logger.info("Monitoring suggest to refresh topology: \(shouldRefreshTopology)")
         guard shouldRefreshTopology else { return }
         discovery(for: application.eventLoopGroup.next())
     }
 
     func switchMaster(from oldMaster: RediStack.RedisClusterNodeID, to newMaster: RediStack.RedisClusterNodeID) {
-        application.logger.notice("MASTER CHANGED FROM: \(oldMaster) TO \(newMaster)")
+        logger.notice(
+            "master changed",
+            metadata: [
+                "Old master": .string(.init(describing: oldMaster)),
+                "New master": .string(.init(describing: newMaster)),
+            ]
+        )
 
         do {
             try refresh(of: .init(from: newMaster, role: .master))
         } catch {
-            application.logger.error(
-                "Cannot refresh master node due to: \(error)",
-                metadata: [
-                    "ID": .string(id.rawValue),
-                    "NEW MASTER": .string(String(describing: newMaster)),
-                ]
-            )
+            logger.error("Cannot refresh master node due to: \(error)")
         }
     }
 
     func detected(replica: RediStack.RedisClusterNodeID, relatedTo master: RediStack.RedisClusterNodeID) {
-        application.logger.notice("REPLICA DETECTED: \(replica) RELATED TO MASTER: \(master)")
+        logger.notice(
+            "replica detected",
+            metadata: [
+                "replica": .string(.init(describing: replica)),
+                "master": .string(.init(describing: master)),
+            ])
 
         do {
             try refresh(of: .init(from: replica, role: .slave))
         } catch {
-            application.logger.error(
-                "Cannot refresh replica node due to: \(error)",
-                metadata: [
-                    "ID": .string(id.rawValue),
-                    "NEW REPLICA": .string(String(describing: replica)),
-                    "MASTER": .string(String(describing: master)),
-                ]
-            )
+            logger.error("Cannot refresh replica node due to: \(error)")
         }
     }
 }
 
 extension RedisCluster {
-    private func refresh(of node: RedisNode) {
+    private func refresh(of node: RedisNode) throws {
         lock.lock()
         defer { lock.unlock() }
-        application.logger.trace("refresh of \(node.role) using \(node.id)")
+
+        logger.trace("node refresh", metadata: ["node": .string(.init(describing: node))])
 
         guard case let .highAvailability(_, redis) = mode else { return }
 
-        let updated = try! redis.configuration.generate(using: node)
+        let updated = try redis.configuration.generate(using: node)
         let newPool = makePools(using: updated)
 
         switch node.role {
         case .master:
             master.values
-                .forEach({ $0.close(promise: nil, logger: application.logger) })
+                .forEach({ $0.close(promise: nil, logger: logger) })
             replicas.values
                 .flatMap(\.values)
-                .forEach({ $0.close(promise: nil, logger: application.logger) })
+                .forEach({ $0.close(promise: nil, logger: logger) })
             master.removeAll()
             replicas.removeAll()
 
@@ -212,9 +214,9 @@ extension RedisCluster {
             break
         case .slave:
             if let idx = replicas.firstIndex(where: { $0.key == node.id }) {
-                application.logger.notice("TURNING OFF REPLICA \(node.id)")
+                logger.debug("removing replica")
                 let toShutdown = replicas.remove(at: idx).value
-                toShutdown.values.forEach({ $0.close(promise: nil, logger: application.logger) })
+                toShutdown.values.forEach({ $0.close(promise: nil, logger: logger) })
             }
 
             replicas[node.id] = newPool
@@ -255,10 +257,16 @@ extension RedisCluster {
                 }
         }()
 
-        application.logger.notice("CREATION OF POOL CONF IP: \(configuration.serverAddresses) for id: \(id)")
+        logger.debug(
+            "redis pool creation",
+            metadata: [
+                "addresses": .string(configuration.serverAddresses.description),
+                "eventLoop" : .string(eventLoop.key.debugDescription)
+            ]
+        )
 
         return RedisConnectionPool(
-            configuration: .init(configuration, defaultLogger: application.logger, customClient: redisTLSClient),
+            configuration: .init(configuration, defaultLogger: logger, customClient: redisTLSClient),
             boundEventLoop: eventLoop
         )
     }
